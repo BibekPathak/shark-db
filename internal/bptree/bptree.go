@@ -85,6 +85,88 @@ func (t *BPTree) Delete(key string) bool {
     return false
 }
 
+// RangeFrom returns up to limit key/value pairs starting at the first key >= start.
+// If start is empty, iteration begins at the leftmost leaf. If limit <= 0, returns all.
+func (t *BPTree) RangeFrom(start string, limit int) [][2]string {
+    var results [][2]string
+    if t.Root == nil { return results }
+    // Find starting leaf
+    n := t.Root
+    if start == "" {
+        for !n.IsLeaf { n = n.Children[0] }
+    } else {
+        for !n.IsLeaf {
+            idx := upperBound(n.Keys, start)
+            n = n.Children[idx]
+        }
+    }
+    // Position within the leaf
+    i := 0
+    if start != "" {
+        i = sort.SearchStrings(n.Keys, start)
+    }
+    for n != nil {
+        for i < len(n.Keys) {
+            kv := [2]string{n.Keys[i], n.Values[i]}
+            results = append(results, kv)
+            i++
+            if limit > 0 && len(results) >= limit { return results }
+        }
+        n = n.Next
+        i = 0
+    }
+    return results
+}
+
+// RangePrefix returns up to limit key/value pairs whose key has the given prefix.
+func (t *BPTree) RangePrefix(prefix string, limit int) [][2]string {
+    results := t.RangeFrom(prefix, 0)
+    out := make([][2]string, 0, len(results))
+    for _, kv := range results {
+        if !hasPrefix(kv[0], prefix) { break }
+        out = append(out, kv)
+        if limit > 0 && len(out) >= limit { break }
+    }
+    return out
+}
+
+func hasPrefix(s, prefix string) bool {
+    if len(prefix) == 0 { return true }
+    if len(s) < len(prefix) { return false }
+    return s[:len(prefix)] == prefix
+}
+
+// LeftmostKey returns the smallest key if any.
+func (t *BPTree) LeftmostKey() (string, bool) {
+    if t.Root == nil { return "", false }
+    n := t.Root
+    for !n.IsLeaf { n = n.Children[0] }
+    if len(n.Keys) == 0 { return "", false }
+    return n.Keys[0], true
+}
+
+// RightmostKey returns the largest key if any.
+func (t *BPTree) RightmostKey() (string, bool) {
+    if t.Root == nil { return "", false }
+    n := t.Root
+    for !n.IsLeaf { n = n.Children[len(n.Children)-1] }
+    if len(n.Keys) == 0 { return "", false }
+    return n.Keys[len(n.Keys)-1], true
+}
+
+// Height returns the height of the tree in nodes (leaf = 1).
+func (t *BPTree) Height() int {
+    if t.Root == nil { return 0 }
+    h := 0
+    n := t.Root
+    for {
+        h++
+        if n.IsLeaf { break }
+        n = n.Children[0]
+    }
+    return h
+}
+
 // insertRecursive inserts into subtree rooted at n. If the child grew and split,
 // returns (newRightChild, separatorKey, grew=true). For leaves, grew indicates a split occurred.
 func insertRecursive(n *Node, key, value string) (*Node, string, bool) {

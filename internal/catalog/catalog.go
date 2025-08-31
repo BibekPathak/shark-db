@@ -7,24 +7,24 @@ import (
 	"fmt"
 
 	"sharkDB/internal/bptree"
-	"sharkDB/internal/pager"
+	"sharkDB/internal/pager2"
 )
 
 // Catalog maps table names to persistent table ids and stores/loads
 // each table's B+ tree as a serialized blob via the pager.
 
 type Catalog struct {
-	p *pager.Pager
+	p *pager2.Pager
 }
 
-func New(p *pager.Pager) *Catalog { return &Catalog{p: p} }
+func New(p *pager2.Pager) *Catalog { return &Catalog{p: p} }
 
 func (c *Catalog) CreateTable(name string) error {
 	m := c.p.Meta()
 	if _, exists := m.Tables[name]; exists {
 		return fmt.Errorf("table %s already exists", name)
 	}
-	return c.p.UpdateMeta(func(meta *pager.Meta) {
+	return c.p.UpdateMeta(func(meta *pager2.Meta) {
 		if meta.Tables == nil {
 			meta.Tables = make(map[string]uint64)
 		}
@@ -75,7 +75,36 @@ func (c *Catalog) DeleteTable(name string) error {
 	if err := c.p.DeleteTableBlob(id); err != nil {
 		return err
 	}
-	return c.p.UpdateMeta(func(meta *pager.Meta) {
+	return c.p.UpdateMeta(func(meta *pager2.Meta) {
 		delete(meta.Tables, name)
+	})
+}
+
+// ListTables returns all table names.
+func (c *Catalog) ListTables() []string {
+	m := c.p.Meta()
+	out := make([]string, 0, len(m.Tables))
+	for name := range m.Tables {
+		out = append(out, name)
+	}
+	return out
+}
+
+// RenameTable changes a table's name in metadata.
+func (c *Catalog) RenameTable(oldName, newName string) error {
+	m := c.p.Meta()
+	if _, ok := m.Tables[newName]; ok {
+		return fmt.Errorf("table %s already exists", newName)
+	}
+	id, ok := m.Tables[oldName]
+	if !ok {
+		return fmt.Errorf("table %s not found", oldName)
+	}
+	return c.p.UpdateMeta(func(meta *pager2.Meta) {
+		delete(meta.Tables, oldName)
+		if meta.Tables == nil {
+			meta.Tables = make(map[string]uint64)
+		}
+		meta.Tables[newName] = id
 	})
 }
