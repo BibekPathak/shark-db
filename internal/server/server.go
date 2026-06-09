@@ -12,8 +12,6 @@ import (
 	"sharkDB/internal/txn"
 )
 
-// Serve starts a plain TCP server that accepts one-line commands compatible with the CLI.
-// Each connection maintains its own transaction state. Commands and outputs are text lines.
 type Options struct {
 	RequireToken string
 	ReadOnly     bool
@@ -45,6 +43,14 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 	var writeTx bool
 	var curTx *txn.Tx
 	authed := opts.RequireToken == ""
+
+	getTx := func() *txn.Tx {
+		if curTx != nil {
+			return curTx
+		}
+		return tm.Begin(true)
+	}
+
 	for in.Scan() {
 		line := strings.TrimSpace(in.Text())
 		if line == "" {
@@ -100,8 +106,6 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 			readOnly := len(cmd.Args) == 1 && cmd.Args[0] == "READONLY"
 			if !readOnly {
 				curTx = tm.Begin(false)
-			} else {
-				curTx = nil
 			}
 			inTx = true
 			writeTx = !readOnly
@@ -180,7 +184,7 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 				writeTx = true
 				implicit = true
 			}
-			out, err := eng.Insert(cmd.Args[0], cmd.Args[1], strings.Join(cmd.Args[2:], " "))
+			out, err := eng.Insert(cmd.Args[0], cmd.Args[1], strings.Join(cmd.Args[2:], " "), curTx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
@@ -210,7 +214,7 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 				writeTx = true
 				implicit = true
 			}
-			out, err := eng.Update(cmd.Args[0], cmd.Args[1], strings.Join(cmd.Args[2:], " "))
+			out, err := eng.Update(cmd.Args[0], cmd.Args[1], strings.Join(cmd.Args[2:], " "), curTx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
@@ -262,7 +266,7 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 				writeTx = true
 				implicit = true
 			}
-			out, err := eng.Delete(cmd.Args[0], cmd.Args[1])
+			out, err := eng.Delete(cmd.Args[0], cmd.Args[1], curTx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
@@ -305,11 +309,15 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 				writeTx = false
 			}
 		case "GET":
-			v, err := eng.Get(cmd.Args[0], cmd.Args[1])
+			tx := getTx()
+			v, err := eng.Get(cmd.Args[0], cmd.Args[1], tx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
 				fmt.Fprintln(wr, v)
+			}
+			if curTx == nil {
+				tx.Abort()
 			}
 		case "TABLES":
 			for _, n := range eng.ListTables() {
@@ -328,13 +336,17 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 					limit = L
 				}
 			}
-			pairs, err := eng.Scan(tbl, start, limit)
+			tx := getTx()
+			pairs, err := eng.Scan(tbl, start, limit, tx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
 				for _, kv := range pairs {
 					fmt.Fprintf(wr, "%s\t%s\n", kv[0], kv[1])
 				}
+			}
+			if curTx == nil {
+				tx.Abort()
 			}
 		case "PREFIXSCAN":
 			prefix := cmd.Args[1]
@@ -345,7 +357,8 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 					limit = L
 				}
 			}
-			pairs, err := eng.PrefixScan(cmd.Args[0], prefix, limit)
+			tx := getTx()
+			pairs, err := eng.PrefixScan(cmd.Args[0], prefix, limit, tx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
@@ -353,12 +366,19 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 					fmt.Fprintf(wr, "%s\t%s\n", kv[0], kv[1])
 				}
 			}
+			if curTx == nil {
+				tx.Abort()
+			}
 		case "EXISTS":
-			ok, err := eng.Exists(cmd.Args[0], cmd.Args[1])
+			tx := getTx()
+			ok, err := eng.Exists(cmd.Args[0], cmd.Args[1], tx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
 				fmt.Fprintln(wr, ok)
+			}
+			if curTx == nil {
+				tx.Abort()
 			}
 		case "RENAME":
 			implicit := false
@@ -388,7 +408,7 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 				writeTx = true
 				implicit = true
 			}
-			out, err := eng.Truncate(cmd.Args[0])
+			out, err := eng.Truncate(cmd.Args[0], curTx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
@@ -401,27 +421,39 @@ func handleConn(conn net.Conn, eng *engine.Engine, tm *txn.Manager, opts Options
 				writeTx = false
 			}
 		case "STATS":
-			s, err := eng.Stats(cmd.Args[0])
+			tx := getTx()
+			s, err := eng.Stats(cmd.Args[0], tx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
 				fmt.Fprintf(wr, "count=%d height=%d min=%s max=%s\n", s.Count, s.Height, s.MinKey, s.MaxKey)
 			}
+			if curTx == nil {
+				tx.Abort()
+			}
 		case "COUNT":
-			n, err := eng.Count(cmd.Args[0])
+			tx := getTx()
+			n, err := eng.Count(cmd.Args[0], tx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
 				fmt.Fprintln(wr, n)
 			}
+			if curTx == nil {
+				tx.Abort()
+			}
 		case "DUMP":
-			pairs, err := eng.Scan(cmd.Args[0], "", 0)
+			tx := getTx()
+			pairs, err := eng.Scan(cmd.Args[0], "", 0, tx)
 			if err != nil {
 				fmt.Fprintln(wr, "ERR:", err)
 			} else {
 				for _, kv := range pairs {
 					fmt.Fprintf(wr, "%s\t%s\n", kv[0], kv[1])
 				}
+			}
+			if curTx == nil {
+				tx.Abort()
 			}
 		default:
 			fmt.Fprintln(wr, "ERR: unknown command")

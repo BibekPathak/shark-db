@@ -12,13 +12,21 @@ import (
 
 const PageSize = 4096
 
+const (
+	WAL_OP_STORE     = 1
+	WAL_OP_DELETE    = 2
+	WAL_OP_TX_COMMIT = 3
+	WAL_OP_TX_ABORT  = 4
+)
+
 // Meta is stored (gob-encoded) in page 0.
 type Meta struct {
 	Tables      map[string]uint64 // table name -> table id
 	NextTableID uint64
 
-	TableHead map[uint64]uint64 // table id -> head page id of blob chain (0 if none)
-	FreeList  uint64            // head page id of free list (0 if empty)
+	TableHead   map[uint64]uint64 // table id -> head page id of blob chain (0 if none)
+	FreeList    uint64            // head page id of free list (0 if empty)
+	MinActiveTx uint64            // oldest active transaction ID for GC
 }
 
 type Pager struct {
@@ -424,7 +432,6 @@ func (p *Pager) replayWAL() error {
 	if _, err := p.wal.Seek(0, 0); err != nil {
 		return err
 	}
-	// read all
 	data, err := io.ReadAll(p.wal)
 	if err != nil {
 		return err
@@ -442,8 +449,6 @@ func (p *Pager) replayWAL() error {
 			}
 			blob := data[off : off+blobLen]
 			off += blobLen
-			// apply as store without logging
-			// free old
 			if head, ok := p.meta.TableHead[tableID]; ok && head != 0 {
 				if err := p.freeChain(head); err != nil {
 					return err
@@ -498,11 +503,55 @@ func (p *Pager) replayWAL() error {
 			if err := p.flushMeta(); err != nil {
 				return err
 			}
+		case 3:
+			p.meta.MinActiveTx = tableID
+		case 4:
 		default:
 			return nil
 		}
 	}
 	return nil
+}
+
+func (p *Pager) walAppendCommit(txID uint64) error {
+	hdr := make([]byte, 1+8+8)
+	hdr[0] = WAL_OP_TX_COMMIT
+	binary.LittleEndian.PutUint64(hdr[1:9], txID)
+	binary.LittleEndian.PutUint64(hdr[9:17], 0)
+	if _, err := p.wal.Write(hdr); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Pager) walAppendAbort(txID uint64) error {
+	hdr := make([]byte, 1+8+8)
+	hdr[0] = WAL_OP_TX_ABORT
+	binary.LittleEndian.PutUint64(hdr[1:9], txID)
+	binary.LittleEndian.PutUint64(hdr[9:17], 0)
+	if _, err := p.wal.Write(hdr); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Pager) PurgeVersions(beforeTxID uint64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if beforeTxID > p.meta.MinActiveTx {
+		p.meta.MinActiveTx = beforeTxID
+		return p.flushMeta()
+	}
+	return nil
+}
+
+func (p *Pager) SetMinActiveTx(txID uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if txID > p.meta.MinActiveTx {
+		p.meta.MinActiveTx = txID
+		p.flushMeta()
+	}
 }
 
 // minimal writer that writes to provided backing buffer

@@ -14,17 +14,13 @@ type Options struct {
 	ReadOnly     bool
 }
 
-// Start launches an HTTP server on addr with basic endpoints over the engine.
-// Write endpoints take an implicit write transaction using the provided txn manager.
 func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error {
 	mux := http.NewServeMux()
 
-	// List tables
 	mux.HandleFunc("/tables", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			for _, n := range eng.ListTables() {
 				_, _ = io.WriteString(w, n+"\n")
-				// one name per line
 			}
 			return
 		}
@@ -37,7 +33,6 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			// create table, expects ?name=tbl or body as name
 			tbl := r.URL.Query().Get("name")
 			if tbl == "" {
 				b, _ := io.ReadAll(r.Body)
@@ -55,7 +50,6 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	})
 
-	// Drop table: DELETE /tables/{table}
 	mux.HandleFunc("/tables/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -83,10 +77,8 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 		_, _ = io.WriteString(w, "OK\n")
 	})
 
-	// KV endpoints: GET/PUT/DELETE /kv/{table}/{key}
 	mux.HandleFunc("/kv/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path[len("/kv/"):]
-		// expected: table/key
 		slash := -1
 		for i := 0; i < len(path); i++ {
 			if path[i] == '/' {
@@ -102,7 +94,9 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 		key := path[slash+1:]
 		switch r.Method {
 		case http.MethodGet:
-			v, err := eng.Get(table, key)
+			tx := tm.Begin(true)
+			defer tx.Abort()
+			v, err := eng.Get(table, key, tx)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
@@ -120,7 +114,7 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 			b, _ := io.ReadAll(r.Body)
 			tx := tm.Begin(false)
 			defer tx.Commit()
-			if _, err := eng.Update(table, key, string(b)); err != nil {
+			if _, err := eng.Update(table, key, string(b), tx); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -136,7 +130,7 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 			}
 			tx := tm.Begin(false)
 			defer tx.Commit()
-			if _, err := eng.Delete(table, key); err != nil {
+			if _, err := eng.Delete(table, key, tx); err != nil {
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
@@ -146,7 +140,6 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 		}
 	})
 
-	// Scan: GET /scan/{table}?start=&limit=
 	mux.HandleFunc("/scan/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -160,7 +153,9 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 				limit = n
 			}
 		}
-		pairs, err := eng.Scan(table, start, limit)
+		tx := tm.Begin(true)
+		defer tx.Abort()
+		pairs, err := eng.Scan(table, start, limit, tx)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -170,7 +165,6 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 		}
 	})
 
-	// Prefix scan: GET /prefix/{table}?prefix=&limit=
 	mux.HandleFunc("/prefix/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -184,7 +178,9 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 				limit = n
 			}
 		}
-		pairs, err := eng.PrefixScan(table, prefix, limit)
+		tx := tm.Begin(true)
+		defer tx.Abort()
+		pairs, err := eng.PrefixScan(table, prefix, limit, tx)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -194,14 +190,15 @@ func Start(addr string, eng *engine.Engine, tm *txn.Manager, opts Options) error
 		}
 	})
 
-	// Stats: GET /stats/{table}
 	mux.HandleFunc("/stats/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		table := r.URL.Path[len("/stats/"):]
-		s, err := eng.Stats(table)
+		tx := tm.Begin(true)
+		defer tx.Abort()
+		s, err := eng.Stats(table, tx)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

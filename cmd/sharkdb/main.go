@@ -13,6 +13,7 @@ import (
 	"sharkDB/internal/pager2"
 	"sharkDB/internal/parser"
 	"sharkDB/internal/server"
+	"sharkDB/internal/sql"
 	"sharkDB/internal/txn"
 )
 
@@ -33,6 +34,7 @@ func main() {
 	}
 	eng := engine.New(p)
 	tm := txn.NewManager()
+	sqlExec := sql.NewExecutor(eng, tm)
 
 	if *serve != "" {
 		log.Printf("starting server on %s", *serve)
@@ -56,6 +58,14 @@ func main() {
 	var inTx bool
 	var writeTx bool
 	var curTx *txn.Tx
+
+	getTx := func() *txn.Tx {
+		if curTx != nil {
+			return curTx
+		}
+		return tm.Begin(true)
+	}
+
 	for {
 		if inTx {
 			fmt.Print("sharkdb(tx)> ")
@@ -95,11 +105,8 @@ func main() {
 				continue
 			}
 			readOnly := len(cmd.Args) == 1 && cmd.Args[0] == "READONLY"
-			// Acquire write lock if not readonly
 			if !readOnly {
 				curTx = tm.Begin(false)
-			} else {
-				curTx = nil // no lock needed for readonly
 			}
 			inTx = true
 			writeTx = !readOnly
@@ -157,7 +164,7 @@ func main() {
 				implicit = true
 			}
 			table, key, val := cmd.Args[0], cmd.Args[1], cmd.Args[2]
-			if out, err := eng.Insert(table, key, val); err != nil {
+			if out, err := eng.Insert(table, key, val, curTx); err != nil {
 				fmt.Println("ERR:", err)
 			} else {
 				fmt.Println(out)
@@ -177,7 +184,7 @@ func main() {
 				implicit = true
 			}
 			table, key, val := cmd.Args[0], cmd.Args[1], cmd.Args[2]
-			if out, err := eng.Update(table, key, val); err != nil {
+			if out, err := eng.Update(table, key, val, curTx); err != nil {
 				fmt.Println("ERR:", err)
 			} else {
 				fmt.Println(out)
@@ -190,7 +197,6 @@ func main() {
 			}
 		case "DELETE":
 			if len(cmd.Args) == 1 {
-				// DELETE <table> : drop table shorthand (allow implicit tx)
 				implicit := false
 				if !inTx || !writeTx {
 					curTx = tm.Begin(false)
@@ -220,7 +226,7 @@ func main() {
 				implicit = true
 			}
 			table, key := cmd.Args[0], cmd.Args[1]
-			if out, err := eng.Delete(table, key); err != nil {
+			if out, err := eng.Delete(table, key, curTx); err != nil {
 				fmt.Println("ERR:", err)
 			} else {
 				fmt.Println(out)
@@ -252,11 +258,15 @@ func main() {
 				writeTx = false
 			}
 		case "GET":
+			tx := getTx()
 			table, key := cmd.Args[0], cmd.Args[1]
-			if v, err := eng.Get(table, key); err != nil {
+			if v, err := eng.Get(table, key, tx); err != nil {
 				fmt.Println("ERR:", err)
 			} else {
 				fmt.Println(v)
+			}
+			if curTx == nil {
+				tx.Abort()
 			}
 		case "TABLES":
 			names := eng.ListTables()
@@ -275,7 +285,6 @@ func main() {
 				start = cmd.Args[1]
 			}
 			if len(cmd.Args) == 3 {
-				// parse limit
 				var L int
 				_, err := fmt.Sscanf(cmd.Args[2], "%d", &L)
 				if err != nil {
@@ -284,13 +293,17 @@ func main() {
 				}
 				limit = L
 			}
-			pairs, err := eng.Scan(tbl, start, limit)
+			tx := getTx()
+			pairs, err := eng.Scan(tbl, start, limit, tx)
 			if err != nil {
 				fmt.Println("ERR:", err)
 				continue
 			}
 			for _, kv := range pairs {
 				fmt.Printf("%s\t%s\n", kv[0], kv[1])
+			}
+			if curTx == nil {
+				tx.Abort()
 			}
 		case "PREFIXSCAN":
 			if len(cmd.Args) < 2 || len(cmd.Args) > 3 {
@@ -306,7 +319,8 @@ func main() {
 					limit = L
 				}
 			}
-			pairs, err := eng.PrefixScan(tbl, prefix, limit)
+			tx := getTx()
+			pairs, err := eng.PrefixScan(tbl, prefix, limit, tx)
 			if err != nil {
 				fmt.Println("ERR:", err)
 				continue
@@ -314,17 +328,24 @@ func main() {
 			for _, kv := range pairs {
 				fmt.Printf("%s\t%s\n", kv[0], kv[1])
 			}
+			if curTx == nil {
+				tx.Abort()
+			}
 		case "EXISTS":
 			if len(cmd.Args) != 2 {
 				fmt.Println("ERR: EXISTS <table> <key>")
 				continue
 			}
-			ok, err := eng.Exists(cmd.Args[0], cmd.Args[1])
+			tx := getTx()
+			ok, err := eng.Exists(cmd.Args[0], cmd.Args[1], tx)
 			if err != nil {
 				fmt.Println("ERR:", err)
 				continue
 			}
 			fmt.Println(ok)
+			if curTx == nil {
+				tx.Abort()
+			}
 		case "RENAME":
 			if len(cmd.Args) != 2 {
 				fmt.Println("ERR: RENAME <old> <new>")
@@ -360,7 +381,7 @@ func main() {
 				writeTx = true
 				implicit = true
 			}
-			if out, err := eng.Truncate(cmd.Args[0]); err != nil {
+			if out, err := eng.Truncate(cmd.Args[0], curTx); err != nil {
 				fmt.Println("ERR:", err)
 			} else {
 				fmt.Println(out)
@@ -376,32 +397,40 @@ func main() {
 				fmt.Println("ERR: STATS <table>")
 				continue
 			}
-			s, err := eng.Stats(cmd.Args[0])
+			tx := getTx()
+			s, err := eng.Stats(cmd.Args[0], tx)
 			if err != nil {
 				fmt.Println("ERR:", err)
 				continue
 			}
 			fmt.Printf("count=%d height=%d min=%s max=%s\n", s.Count, s.Height, s.MinKey, s.MaxKey)
+			if curTx == nil {
+				tx.Abort()
+			}
 		case "COUNT":
 			if len(cmd.Args) != 1 {
 				fmt.Println("ERR: COUNT <table>")
 				continue
 			}
 			tbl := cmd.Args[0]
-			n, err := eng.Count(tbl)
+			tx := getTx()
+			n, err := eng.Count(tbl, tx)
 			if err != nil {
 				fmt.Println("ERR:", err)
 				continue
 			}
 			fmt.Println(n)
+			if curTx == nil {
+				tx.Abort()
+			}
 		case "DUMP":
-			// DUMP <table> [filepath]; prints TSV if no file
 			if len(cmd.Args) != 1 && len(cmd.Args) != 2 {
 				fmt.Println("ERR: DUMP <table> [file]")
 				continue
 			}
 			tbl := cmd.Args[0]
-			pairs, err := eng.Scan(tbl, "", 0)
+			tx := getTx()
+			pairs, err := eng.Scan(tbl, "", 0, tx)
 			if err != nil {
 				fmt.Println("ERR:", err)
 				continue
@@ -424,8 +453,10 @@ func main() {
 				f.Close()
 				fmt.Println("OK")
 			}
+			if curTx == nil {
+				tx.Abort()
+			}
 		case "LOAD":
-			// LOAD <table> <file> (TSV: key\tvalue)
 			if len(cmd.Args) != 2 {
 				fmt.Println("ERR: LOAD <table> <file>")
 				continue
@@ -469,7 +500,7 @@ func main() {
 					continue
 				}
 				k, v = parts[0], parts[1]
-				if _, err := eng.Insert(tbl, k, v); err != nil {
+				if _, err := eng.Insert(tbl, k, v, curTx); err != nil {
 					fmt.Println("ERR:", err)
 					if implicit {
 						curTx.Abort()
@@ -489,6 +520,15 @@ func main() {
 				writeTx = false
 			}
 			fmt.Println("OK")
+		case "SQL":
+			results, err := sqlExec.Execute(cmd.Args[0])
+			if err != nil {
+				fmt.Println("ERR:", err)
+			} else {
+				for _, row := range results {
+					fmt.Println(strings.Join(row, "\t"))
+				}
+			}
 		default:
 			fmt.Println("ERR: unknown command")
 		}

@@ -15,20 +15,20 @@ var (
 	ErrParse = errors.New("parse error")
 )
 
-// Parse a very small command language:
-// CREATE <table>
-// INSERT <table> <key> <value>
-// GET <table> <key>
-// UPDATE <table> <key> <value>
-// DELETE <table> <key>
-// BEGIN [READONLY]
-// COMMIT
-// ABORT
 func Parse(line string) (Command, error) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return Command{}, ErrParse
 	}
+
+	upper := strings.ToUpper(line)
+	sqlKeywords := []string{"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP"}
+	for _, kw := range sqlKeywords {
+		if strings.HasPrefix(upper, kw) {
+			return Command{Name: "SQL", Args: []string{line}}, nil
+		}
+	}
+
 	fields := splitFields(line)
 	if len(fields) == 0 {
 		return Command{}, ErrParse
@@ -44,7 +44,6 @@ func Parse(line string) (Command, error) {
 		if len(args) < 3 {
 			return Command{}, fmt.Errorf("INSERT requires 3 args")
 		}
-		// allow spaces in value by joining tail
 		args = []string{args[0], args[1], strings.Join(args[2:], " ")}
 	case "GET":
 		if len(args) != 2 {
@@ -56,7 +55,6 @@ func Parse(line string) (Command, error) {
 		}
 		args = []string{args[0], args[1], strings.Join(args[2:], " ")}
 	case "DELETE":
-		// Allow either DELETE <table> <key> (row delete) or DELETE <table> (drop table shorthand)
 		if len(args) != 2 && len(args) != 1 {
 			return Command{}, fmt.Errorf("DELETE requires 1 or 2 args")
 		}
@@ -80,12 +78,10 @@ func Parse(line string) (Command, error) {
 			return Command{}, fmt.Errorf("TABLES takes no args")
 		}
 	case "SCAN":
-		// SCAN <table> [startKey] [limit]
 		if len(args) < 1 || len(args) > 3 {
 			return Command{}, fmt.Errorf("SCAN requires 1..3 args")
 		}
 	case "PREFIXSCAN":
-		// PREFIXSCAN <table> <prefix> [limit]
 		if len(args) < 2 || len(args) > 3 {
 			return Command{}, fmt.Errorf("PREFIXSCAN requires 2..3 args")
 		}
@@ -94,12 +90,10 @@ func Parse(line string) (Command, error) {
 			return Command{}, fmt.Errorf("COUNT requires 1 arg")
 		}
 	case "DUMP":
-		// DUMP <table> [filepath]
 		if len(args) != 1 && len(args) != 2 {
 			return Command{}, fmt.Errorf("DUMP requires 1 or 2 args")
 		}
 	case "LOAD":
-		// LOAD <table> <filepath> (TSV: key\tvalue per line)
 		if len(args) != 2 {
 			return Command{}, fmt.Errorf("LOAD requires 2 args")
 		}
@@ -134,8 +128,6 @@ func Parse(line string) (Command, error) {
 }
 
 func splitFields(s string) []string {
-	// simple whitespace split respecting double quotes for the value is overkill here
-	// We'll just split by spaces and re-join for value in Parse above.
 	parts := strings.Fields(s)
 	return parts
 }
